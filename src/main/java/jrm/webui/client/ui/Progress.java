@@ -79,6 +79,12 @@ public class Progress extends Window /* NOSONAR */ {
     /** Set once this window is destroyed, so callers can avoid reusing it. */
     private boolean progressDestroyed = false;
 
+    /**
+     * Latch: {@code true} once sub-info rows were displayed for the first time; later
+     * {@code setInfos} calls keep the sub-info rows instead of removing them.
+     */
+    private boolean subInfosShown = false;
+
     /** Primary progress bar (overall scan/audit operation). */
     private final Progressbar progressBar;
 
@@ -120,8 +126,8 @@ public class Progress extends Window /* NOSONAR */ {
         setShowModalMask(true);
         setWidth(1000);
         setMinWidth(700);
-        setHeight(250);
-        setMinHeight(150);
+        setHeight(500);
+        setMinHeight(300);
         setCanDragResize(true);
         setID("Progress");
         setTitle("Progression");
@@ -221,9 +227,17 @@ public class Progress extends Window /* NOSONAR */ {
      *            the number of thread info lines to display
      * @param multipleSubInfos
      *            {@code true} to show one sub-info line per thread, {@code false}
-     *            to show a single shared sub-info line, or {@code null} to show none
+     *            to show a single shared sub-info line, or {@code null} to show none;
+     *            once sub-info rows have been shown, {@code null} keeps the last mode
+     *            instead of removing the rows (sub-info latch)
      */
     public void setInfos(int threadCnt, Boolean multipleSubInfos) {
+        // Sub-info latch: once the sub-info rows were first shown, keep them even when
+        // a later setInfos would drop them (null mode) — avoids rows appearing/disappearing.
+        if (subInfosShown && multipleSubInfos == null)
+            multipleSubInfos = currentMultipleSubInfos;
+        if (multipleSubInfos != null)
+            subInfosShown = true;
         if (threadCnt == currentThreadCnt && Objects.equals(multipleSubInfos, currentMultipleSubInfos))
             return;
         currentThreadCnt = threadCnt;

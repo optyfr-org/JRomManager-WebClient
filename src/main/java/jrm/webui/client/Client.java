@@ -4,6 +4,7 @@ import java.util.HashSet;
 import java.util.Set;
 
 import com.google.gwt.core.client.EntryPoint;
+import com.google.gwt.core.client.JavaScriptObject;
 import com.google.gwt.core.client.JsonUtils;
 import com.google.gwt.core.client.Scheduler;
 import com.google.gwt.core.client.Scheduler.RepeatingCommand;
@@ -30,6 +31,7 @@ import jrm.webui.client.protocol.A_ReportLite;
 import jrm.webui.client.protocol.A_Session;
 import jrm.webui.client.protocol.A_TrntChk;
 import jrm.webui.client.ui.MainWindow;
+import jrm.webui.client.utils.WsChannel;
 
 /**
  * GWT {@link EntryPoint} for the JRomManager web client.
@@ -51,6 +53,21 @@ public class Client implements EntryPoint {
 
     /** Timer that drives the long-polling request loop. */
     private static Timer lprTimer;
+
+    /** Active WebSocket handle when in WS mode; {@code null} otherwise. */
+    private static JavaScriptObject wsHandle = null;
+
+    /** Heartbeat timer sending {@code Global.ping} while WS is open (~120s). */
+    private static Timer wsPingTimer = null;
+
+    /** Probe timer bounding the WS open wait (~3s). */
+    private static Timer wsProbeTimer = null;
+
+    /** {@code true} once a WS session was established (drop -&gt; re-init fallback, not silent re-probe). */
+    private static boolean wsEstablished = false;
+
+    /** Guard against reconnect storms: a single fallback transition per drop. */
+    private static boolean wsFallingBack = false;
 
     /** Creates a new client entry point. */
     public Client() {
@@ -179,11 +196,14 @@ public class Client implements EntryPoint {
     }
 
     /**
-     * Sends a command message to the server via POST.
+     * Sends a command message to the server: over the WS socket when open, else via POST to {@code /actions/cmd}
+     * (covers transient reconnect; the server routes pushes to the live WS manager when open).
      *
      * @param msg the command payload
      */
     public static void sendMsg(String msg) {
+        if (wsHandle != null && WsChannel.send(wsHandle, msg))
+            return;
         RPCRequest request = new RPCRequest();
         request.setActionURL("/actions/cmd");
         SC.logWarn(request.getActionURL());
@@ -192,6 +212,121 @@ public class Client implements EntryPoint {
         request.setHttpMethod("POST"); // keep the request as simple as possible (POST is more complex for HTTP and requires 2 round-trips)
         request.setData(msg);
         RPCManager.sendRequest(request);
+    }
+
+    /**
+     * Starts the classic LPR loop ({@code /actions/init} once, then {@code /actions/lpr}).
+     */
+    private void startLpr() {
+        setLprTimer(new Timer() {
+            boolean init = true;
+
+            @Override
+            public void run() {
+                lpr(init);
+                init = false;
+            }
+        }).schedule(1);
+    }
+
+    /**
+     * Probes the optional {@code /ws} actions channel. On open, enters WS mode (init payloads arrive from the server
+     * {@code onOpen}); on error/close-before-open/timeout, falls back to {@link #startLpr()}. No parallel LPR runs
+     * while probing: the probe outcome decides which channel starts.
+     */
+    private void probeWs() {
+        final String scheme = "https:".equals(com.google.gwt.user.client.Window.Location.getProtocol()) ? "wss://" : "ws://";
+        final String url = scheme + com.google.gwt.user.client.Window.Location.getHost() + "/ws";
+        final var instance = this;
+        wsEstablished = false;
+        wsFallingBack = false;
+        wsProbeTimer = new Timer() {
+            @Override
+            public void run() {
+                // Probe timed out (~3s): fall back to LPR.
+                fallbackToLpr(false);
+            }
+        };
+        wsProbeTimer.schedule(3000);
+        final JavaScriptObject[] holder = new JavaScriptObject[1];
+        holder[0] = WsChannel.open(url, new WsChannel.Handler() {
+            @Override
+            public void onOpen() {
+                if (wsProbeTimer != null) {
+                    wsProbeTimer.cancel();
+                    wsProbeTimer = null;
+                }
+                if (wsFallingBack)
+                    return;
+                wsHandle = holder[0];
+                wsEstablished = true;
+                updateMainWindow();
+                startWsPing();
+            }
+
+            @Override
+            public void onMessage(String data) {
+                instance.processCmd(data);
+            }
+
+            @Override
+            public void onClose() {
+                // Close-before-open (or probe failure) -> plain LPR fallback; established drop -> full re-init.
+                fallbackToLpr(wsEstablished);
+            }
+        });
+        if (holder[0] == null)
+            fallbackToLpr(false);
+    }
+
+    /**
+     * Falls back to LPR exactly once per drop. A fresh drop performs a full re-init ({@code /actions/init} once to
+     * re-seed profile/catver/nplayers + {@code Progress.reload}, then {@code /actions/lpr}) because pushes sent
+     * during WS mode were socket-only and never queued.
+     *
+     * @param reinit {@code true} when dropping an established WS session
+     */
+    private void fallbackToLpr(boolean reinit) {
+        if (wsFallingBack)
+            return;
+        wsFallingBack = true;
+        if (wsProbeTimer != null) {
+            wsProbeTimer.cancel();
+            wsProbeTimer = null;
+        }
+        stopWsPing();
+        if (wsHandle != null) {
+            WsChannel.close(wsHandle);
+            wsHandle = null;
+        }
+        wsEstablished = false;
+        // Both cases start with init=true (fresh re-seed); plain LPR fallback and post-drop re-init coincide.
+        startLpr();
+        wsFallingBack = false;
+    }
+
+    /**
+     * Starts the WS heartbeat: {@code {"cmd":"Global.ping"}} every ~120s (server replies nothing; keeps the
+     * HttpSession alive since WS frames do not touch {@code lastAccessedTime}).
+     */
+    private static void startWsPing() {
+        stopWsPing();
+        wsPingTimer = new Timer() {
+            @Override
+            public void run() {
+                if (wsHandle != null && WsChannel.isOpen(wsHandle))
+                    WsChannel.send(wsHandle, "{\"cmd\":\"Global.ping\"}");
+            }
+        };
+        wsPingTimer.scheduleRepeating(120000);
+    }
+
+    /** Stops the WS heartbeat timer. */
+    private static void stopWsPing() {
+        if (wsPingTimer != null) {
+            wsPingTimer.cancel();
+            wsPingTimer = null;
+        }
     }
 
     /**
@@ -217,15 +352,12 @@ public class Client implements EntryPoint {
                 (RPCResponse response, Object rawData, RPCRequest request) -> {
                     if (response.getHttpResponseCode() == 200) {
                         setSession(JsonUtils.safeEval(rawData.toString()));
-                        setLprTimer(new Timer() {
-                            boolean init = true;
-
-                            @Override
-                            public void run() {
-                                lpr(init);
-                                init = false;
-                            }
-                        }).schedule(1);
+                        // Wait for probe outcome before starting any channel: WS hint on -> probe /ws first
+                        // (no parallel LPR), else pure LPR as before.
+                        if (getSession() != null && getSession().getWebsocket())
+                            probeWs();
+                        else
+                            startLpr();
                     }
                 });
     }

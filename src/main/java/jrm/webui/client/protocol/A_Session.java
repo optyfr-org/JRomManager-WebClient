@@ -57,6 +57,15 @@ public class A_Session extends EnhJSO // NOSONAR
     }
 
     /**
+     * Returns the server's WebSocket hint (absent -&gt; false).
+     *
+     * @return {@code true} when the server registered the {@code /ws} actions channel
+     */
+    public final boolean getWebsocket() {
+        return Optional.ofNullable(getBoolean("websocket")).orElse(false);
+    }
+
+    /**
      * Returns the map of localized message strings.
      * <p>
      * The map is lazily populated from the server-provided JavaScript object on

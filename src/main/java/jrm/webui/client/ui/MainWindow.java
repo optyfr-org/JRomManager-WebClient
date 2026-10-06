@@ -170,12 +170,18 @@ public class MainWindow extends Window //NOSONAR
 
     /**
      * Reacts to a progress start event by opening a new progress dialog.
+     * <p>
+     * Reuses the existing dialog when one is already open (e.g. the server re-sends
+     * the open event after a transport reconnect with a live worker); creating a second
+     * overlapping window there made the progress display flash.
      *
      * @param params
      *            the progress event parameters (unused)
      */
     public void update(A_Progress params) //NOSONAR
     {
+        if (progress != null && !progress.isProgressDestroyed())
+            return;
         progress = new Progress();
     }
 

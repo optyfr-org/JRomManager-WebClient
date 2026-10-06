@@ -3,6 +3,7 @@ package jrm.webui.client.ui;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 
 import com.google.gwt.core.client.JsonUtils;
@@ -25,10 +26,16 @@ import jrm.webui.client.protocol.Q_Progress;
 /**
  * Modal SmartGWT window that reports progress of a long-running server operation.
  * <p>
- * Displays a variable number of thread info labels (with optional sub-info lines)
- * plus up to three progress bars, each with its own time-left label, and a cancel
- * button. The window content is driven by {@link A_Progress.SetFullProgress}
- * payloads received from the server.
+ * Displays a variable number of thread info labels (with optional sub-info lines,
+ * each sub-info placed <em>to the right</em> of its info in the same row to keep
+ * the window compact) plus up to three progress bars, each with its own time-left
+ * label, and a cancel button. The window content is driven by
+ * {@link A_Progress.SetFullProgress} payloads received from the server.
+ * <p>
+ * To avoid flicker, all content updates are diffed: a label canvas is redrawn only
+ * when its text actually changes (this also keeps the indeterminate loading GIF
+ * from being re-created on every update), and info row sets are rebuilt only when
+ * the thread configuration changes.
  *
  * @since 2.5
  */
@@ -42,14 +49,35 @@ public class Progress extends Window /* NOSONAR */ {
     /** Placeholder text shown in a time-left label when no timing information is available. */
     private static final String TIME_TIME = "<code>--:--:--/--:--:--</code>";
 
-    /** Vertical layout holding the per-thread info and sub-info labels. */
+    /** Vertical layout holding the per-thread info rows and the shared sub-info row. */
     private VLayout panel;
 
     /** Per-thread info labels, one row per server-side worker thread. */
     private Label[] lblInfo;
 
-    /** Per-thread (or shared) sub-info labels displayed below the info labels. */
+    /** Per-thread (or shared) sub-info labels, right of each info label when multiple. */
     private Label[] lblSubInfo;
+
+    /** Texts currently displayed in {@link #lblInfo}, for change-diffing. */
+    private String[] lastInfo;
+
+    /** Texts currently displayed in {@link #lblSubInfo}, for change-diffing. */
+    private String[] lastSubInfo;
+
+    /** Thread count of the last applied info configuration, {@code -1} before the first. */
+    private int currentThreadCnt = -1;
+
+    /** Sub-info mode of the last applied info configuration, {@code null} before the first. */
+    private Boolean currentMultipleSubInfos;
+
+    /** Texts currently displayed on the three progress-bar overlays, for change-diffing. */
+    private final String[] lastPbText = new String[3];
+
+    /** Texts currently displayed in the three time-left labels, for change-diffing. */
+    private final String[] lastTimeText = new String[3];
+
+    /** Set once this window is destroyed, so callers can avoid reusing it. */
+    private boolean progressDestroyed = false;
 
     /** Primary progress bar (overall scan/audit operation). */
     private final Progressbar progressBar;
@@ -90,7 +118,8 @@ public class Progress extends Window /* NOSONAR */ {
         Client.getChildWindows().add(this);
         setIsModal(true);
         setShowModalMask(true);
-        setWidth(500);
+        setWidth(1000);
+        setMinWidth(700);
         setHeight(250);
         setMinHeight(150);
         setCanDragResize(true);
@@ -181,6 +210,12 @@ public class Progress extends Window /* NOSONAR */ {
 
     /**
      * (Re)builds the info label area for the given number of threads.
+     * <p>
+     * When {@code multipleSubInfos} is {@code true}, each sub-info label is placed
+     * to the right of its info label in the same row; with {@code false} a single
+     * shared sub-info row spans the full width below all info rows. A no-op when
+     * the requested configuration is unchanged (prevents rebuild flashes when the
+     * server re-sends identical {@code setInfos} after a reconnect).
      *
      * @param threadCnt
      *            the number of thread info lines to display
@@ -189,25 +224,37 @@ public class Progress extends Window /* NOSONAR */ {
      *            to show a single shared sub-info line, or {@code null} to show none
      */
     public void setInfos(int threadCnt, Boolean multipleSubInfos) {
+        if (threadCnt == currentThreadCnt && Objects.equals(multipleSubInfos, currentMultipleSubInfos))
+            return;
+        currentThreadCnt = threadCnt;
+        currentMultipleSubInfos = multipleSubInfos;
+
         panel.removeMembers(panel.getMembers());
 
         lblInfo = new Label[threadCnt];
         int subInfoSize = 0;
-        if (multipleSubInfos != null) {
+        if (multipleSubInfos != null)
             subInfoSize = multipleSubInfos ? threadCnt : 1;
-        }
         lblSubInfo = new Label[subInfoSize];
+        lastInfo = new String[threadCnt];
+        lastSubInfo = new String[subInfoSize];
 
         for (int i = 0; i < threadCnt; i++) {
-            lblInfo[i] = buildLabel(isOdd(i) ? COLOR_NORMAL : COLOR_LIGHT);
-            panel.addMember(lblInfo[i]);
-
+            final var color = isOdd(i) ? COLOR_NORMAL : COLOR_LIGHT;
+            lblInfo[i] = buildLabel(color);
             if (Boolean.TRUE.equals(multipleSubInfos)) {
-                lblSubInfo[i] = buildLabel(isOdd(i) ? COLOR_NORMAL : COLOR_LIGHT);
-                panel.addMember(lblSubInfo[i]);
+                lblSubInfo[i] = buildLabel(color);
+                lblInfo[i].setWidth("55%");
+                lblSubInfo[i].setWidth("45%");
+                final HLayout row = new HLayout();
+                row.setMembersMargin(2);
+                row.addMembers(lblInfo[i], lblSubInfo[i]);
+                panel.addMember(row);
+            } else {
+                panel.addMember(lblInfo[i]);
             }
         }
-        if (multipleSubInfos != null && !multipleSubInfos) {
+        if (Boolean.FALSE.equals(multipleSubInfos)) {
             lblSubInfo[0] = buildLabel(COLOR_LIGHTER);
             panel.addMember(lblSubInfo[0]);
         }
@@ -217,7 +264,8 @@ public class Progress extends Window /* NOSONAR */ {
 
     /**
      * Grows the info label area to the given thread count, preserving existing
-     * labels and appending new ones as needed.
+     * labels and appending new ones as needed. Falls back to a full rebuild when
+     * the sub-info mode changed, since the row layout differs per mode.
      *
      * @param threadCnt
      *            the new total number of thread info lines
@@ -228,27 +276,65 @@ public class Progress extends Window /* NOSONAR */ {
         if (lblInfo == null || lblInfo.length == threadCnt)
             return;
 
-        if (Boolean.TRUE.equals(multipleSubInfos) && lblSubInfo == null)
+        if (!Objects.equals(multipleSubInfos, currentMultipleSubInfos)
+            || Boolean.TRUE.equals(multipleSubInfos) && lblSubInfo == null) {
+            setInfos(threadCnt, multipleSubInfos);
             return;
+        }
 
         final var oldThreadCnt = lblInfo.length;
 
         lblInfo = Arrays.copyOf(lblInfo, threadCnt);
         if (Boolean.TRUE.equals(multipleSubInfos))
             lblSubInfo = Arrays.copyOf(lblSubInfo, threadCnt);
+        lastInfo = Arrays.copyOf(lastInfo, threadCnt);
+        lastSubInfo = Arrays.copyOf(lastSubInfo, lblSubInfo.length);
 
         for (int i = oldThreadCnt; i < threadCnt; i++) {
-            lblInfo[i] = buildLabel(isOdd(i) ? COLOR_NORMAL : COLOR_LIGHT);
-            panel.addMember(lblInfo[i]);
-
+            final var color = isOdd(i) ? COLOR_NORMAL : COLOR_LIGHT;
+            lblInfo[i] = buildLabel(color);
             if (Boolean.TRUE.equals(multipleSubInfos)) {
-                lblSubInfo[i] = buildLabel(isOdd(i) ? COLOR_NORMAL : COLOR_LIGHT);
-                panel.addMember(lblSubInfo[i]);
+                lblSubInfo[i] = buildLabel(color);
+                lblInfo[i].setWidth("55%");
+                lblSubInfo[i].setWidth("45%");
+                final HLayout row = new HLayout();
+                row.setMembersMargin(2);
+                row.addMembers(lblInfo[i], lblSubInfo[i]);
+                panel.addMember(row);
+            } else {
+                panel.addMember(lblInfo[i]);
             }
         }
+        currentThreadCnt = threadCnt;
 
         if (isVisible() && Boolean.TRUE.equals(isDrawn()))
             packHeight();
+    }
+
+    /**
+     * Sets a label's contents only when the text actually changed, so identical
+     * pushes (e.g. a re-sent loading GIF) do not redraw the canvas and the GIF
+     * animation does not restart on every update.
+     *
+     * @param label
+     *            the label to update
+     * @param text
+     *            the new text (null becomes {@code def})
+     * @param cache
+     *            the per-label cache of currently displayed texts
+     * @param index
+     *            the index into {@code cache} and the labels array
+     * @param labels
+     *            the labels array owning {@code label}
+     * @param def
+     *            the default text for null
+     */
+    private static void setContentsIfChanged(Label label, String text, String[] cache, int index, Label[] labels, String def) {
+        final var value = Optional.ofNullable(text).orElse(def);
+        if (cache[index] == null || !cache[index].equals(value)) {
+            labels[index].setContents(value);
+            cache[index] = value;
+        }
     }
 
     /**
@@ -333,29 +419,33 @@ public class Progress extends Window /* NOSONAR */ {
     }
 
     /**
-     * Clears the contents of all info and sub-info labels.
+     * Clears the contents of all info and sub-info labels (invalidating the
+     * content caches so the next update redraws).
      */
     public void clearInfos() {
-        for (Label label : lblInfo)
-            label.setContents("&nbsp;");
-        for (Label label : lblSubInfo)
-            label.setContents("&nbsp;");
+        Arrays.fill(lastInfo, null);
+        Arrays.fill(lastSubInfo, null);
+        for (int i = 0; i < lblInfo.length; i++)
+            lblInfo[i].setContents("&nbsp;");
+        for (int i = 0; i < lblSubInfo.length; i++)
+            lblSubInfo[i].setContents("&nbsp;");
     }
 
     /**
      * Updates the whole window from a full-progress payload received from the server.
+     * Only labels whose text actually changed are redrawn.
      *
      * @param pd
      *            the progress data to apply
      */
     public void setFullProgress(A_Progress.SetFullProgress.ProgressData pd) {
         for (int i = 0; i < lblInfo.length; i++)
-            lblInfo[i].setContents(Optional.ofNullable(pd.getInfos().get(i)).orElse(""));
+            setContentsIfChanged(lblInfo[i], pd.getInfos().get(i), lastInfo, i, lblInfo, "");
         for (int i = 0; i < lblSubInfo.length; i++)
-            lblSubInfo[i].setContents(Optional.ofNullable(pd.getSubInfos().get(i)).orElse(""));
-        updateProgressBar(progressBar, progressBarLabel, lblTimeleft, pd.getPB1(), false);
-        updateProgressBar(progressBar2, progressBarLabel2, lblTimeLeft2, pd.getPB2(), true);
-        updateProgressBar(progressBar3, progressBarLabel3, lblTimeLeft3, pd.getPB3(), true);
+            setContentsIfChanged(lblSubInfo[i], pd.getSubInfos().get(i), lastSubInfo, i, lblSubInfo, "");
+        updateProgressBar(progressBar, progressBarLabel, lblTimeleft, pd.getPB1(), false, 0);
+        updateProgressBar(progressBar2, progressBarLabel2, lblTimeLeft2, pd.getPB2(), true, 1);
+        updateProgressBar(progressBar3, progressBarLabel3, lblTimeLeft3, pd.getPB3(), true, 2);
     }
 
     /**
@@ -373,9 +463,11 @@ public class Progress extends Window /* NOSONAR */ {
      * @param usePercCheck
      *            {@code true} to gate the update on {@code perc >= 0},
      *            {@code false} to gate it on {@code val > 0}
+     * @param idx
+     *            the 0-based bar index used for content diff caches
      */
     private void updateProgressBar(Progressbar pb, Label pbLabel, Label timeLabel,
-            A_Progress.SetFullProgress.ProgressData.Progress pbData, boolean usePercCheck) {
+            A_Progress.SetFullProgress.ProgressData.Progress pbData, boolean usePercCheck, int idx) {
         if (pb.isVisible() != pbData.isVisible()) {
             pb.setVisibility(pbData.isVisible() ? Visibility.INHERIT : Visibility.HIDDEN);
             timeLabel.setVisibility(pb.getVisibility());
@@ -384,18 +476,46 @@ public class Progress extends Window /* NOSONAR */ {
         if (!pbData.isVisible())
             return;
         if (pbData.isIndeterminate()) {
-            pb.setPercentDone(0);
-            pbLabel.setContents(LOADING_IMG);
+            if (pb.getPercentDone() != 0)
+                pb.setPercentDone(0);
+            setPbLabel(pbLabel, LOADING_IMG, idx);
         } else if (usePercCheck ? pbData.getPerc() >= 0 : pbData.getVal() > 0) {
             if (pb.getPercentDone() != (int) pbData.getPerc())
                 pb.setPercentDone((int) pbData.getPerc());
-            if (pbData.hasStringPainted())
-                pbLabel.setContents(Optional.ofNullable(pbData.getMsg()).orElse(""));
-            else
-                pbLabel.setContents("");
-            timeLabel.setContents(CODE_OPEN + pbData.getTimeleft() + CODE_CLOSE);
+            setPbLabel(pbLabel, pbData.hasStringPainted() ? pbData.getMsg() : "", idx);
+            setTimeLabel(timeLabel, CODE_OPEN + pbData.getTimeleft() + CODE_CLOSE, idx);
         } else
-            timeLabel.setContents(TIME_TIME);
+            setTimeLabel(timeLabel, TIME_TIME, idx);
+    }
+
+    /**
+     * Sets the progress-bar overlay label only when its text changed.
+     *
+     * @param pbLabel the overlay label
+     * @param text the new text (null becomes empty)
+     * @param idx the bar index into {@link #lastPbText}
+     */
+    private void setPbLabel(Label pbLabel, String text, int idx) {
+        final var value = Optional.ofNullable(text).orElse("");
+        if (lastPbText[idx] == null || !lastPbText[idx].equals(value)) {
+            pbLabel.setContents(value);
+            lastPbText[idx] = value;
+        }
+    }
+
+    /**
+     * Sets the time-left label only when its text changed.
+     *
+     * @param timeLabel the time-left label
+     * @param text the new text (null becomes {@link #TIME_TIME})
+     * @param idx the bar index into {@link #lastTimeText}
+     */
+    private void setTimeLabel(Label timeLabel, String text, int idx) {
+        final var value = Optional.ofNullable(text).orElse(TIME_TIME);
+        if (lastTimeText[idx] == null || !lastTimeText[idx].equals(value)) {
+            timeLabel.setContents(value);
+            lastTimeText[idx] = value;
+        }
     }
 
     /**
@@ -417,10 +537,21 @@ public class Progress extends Window /* NOSONAR */ {
     }
 
     /**
-     * Removes this window from the client child-window registry when destroyed.
+     * Returns whether this window has been destroyed.
+     *
+     * @return {@code true} once the window was destroyed
+     */
+    public boolean isProgressDestroyed() {
+        return progressDestroyed;
+    }
+
+    /**
+     * Removes this window from the client child-window registry when destroyed,
+     * and flags the window as destroyed for reuse checks.
      */
     @Override
     protected void onDestroy() {
+        progressDestroyed = true;
         Client.getChildWindows().remove(this);
         super.onDestroy();
     }

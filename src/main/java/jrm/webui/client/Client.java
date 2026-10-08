@@ -69,6 +69,15 @@ public class Client implements EntryPoint {
     /** Guard against reconnect storms: a single fallback transition per drop. */
     private static boolean wsFallingBack = false;
 
+    /** Reconnect attempts after an established-drop; reset on successful re-open. */
+    private static int wsReconnectAttempts = 0;
+
+    /** Timer scheduling the next WS reconnect attempt. */
+    private static Timer wsReconnectTimer = null;
+
+    /** {@code true} while the LPR loop runs (classic channel active); {@code false} in WS mode. */
+    private static boolean lprRunning = false;
+
     /** Creates a new client entry point. */
     public Client() {
         super();
@@ -185,6 +194,8 @@ public class Client implements EntryPoint {
         request.setHttpMethod("GET"); // keep the request as simple as possible (POST is more complex for HTTP and requires 2 round-trips)
         request.setWillHandleError(true); // we handle error statuses ourselves
         RPCManager.sendRequest(request, (response, rawData, req) -> {
+            if (!lprRunning)
+                return;
             if (response.getHttpResponseCode() == 200) {
                 processCmd(rawData.toString());
                 lprTimer.schedule(125);
@@ -218,6 +229,7 @@ public class Client implements EntryPoint {
      * Starts the classic LPR loop ({@code /actions/init} once, then {@code /actions/lpr}).
      */
     private void startLpr() {
+        lprRunning = true;
         setLprTimer(new Timer() {
             boolean init = true;
 
@@ -229,25 +241,48 @@ public class Client implements EntryPoint {
         }).schedule(1);
     }
 
+    /** Stops the classic LPR loop (entering WS mode). */
+    private static void stopLpr() {
+        lprRunning = false;
+        if (lprTimer != null) {
+            lprTimer.cancel();
+            lprTimer = null;
+        }
+    }
+
     /**
      * Probes the optional {@code /ws} actions channel. On open, enters WS mode (init payloads arrive from the server
      * {@code onOpen}); on error/close-before-open/timeout, falls back to {@link #startLpr()}. No parallel LPR runs
      * while probing: the probe outcome decides which channel starts.
      */
     private void probeWs() {
+        openWs(false);
+    }
+
+    /**
+     * Opens the {@code /ws} actions channel. On open, enters WS mode (init payloads arrive from the server
+     * {@code onOpen}): stops any running LPR loop, resets the reconnect backoff, and starts the heartbeat.
+     *
+     * @param reconnect {@code true} when re-opening after an established drop (no probe timeout; a guarded
+     *        reconnect is scheduled on failure instead of falling back to LPR)
+     */
+    private void openWs(final boolean reconnect) {
         final String scheme = "https:".equals(com.google.gwt.user.client.Window.Location.getProtocol()) ? "wss://" : "ws://";
         final String url = scheme + com.google.gwt.user.client.Window.Location.getHost() + "/ws";
         final var instance = this;
-        wsEstablished = false;
+        if (!reconnect)
+            wsEstablished = false;
         wsFallingBack = false;
-        wsProbeTimer = new Timer() {
-            @Override
-            public void run() {
-                // Probe timed out (~3s): fall back to LPR.
-                fallbackToLpr(false);
-            }
-        };
-        wsProbeTimer.schedule(3000);
+        if (!reconnect) {
+            wsProbeTimer = new Timer() {
+                @Override
+                public void run() {
+                    // Probe timed out (~3s): fall back to LPR.
+                    fallbackToLpr(false);
+                }
+            };
+            wsProbeTimer.schedule(3000);
+        }
         final JavaScriptObject[] holder = new JavaScriptObject[1];
         holder[0] = WsChannel.open(url, new WsChannel.Handler() {
             @Override
@@ -256,10 +291,16 @@ public class Client implements EntryPoint {
                     wsProbeTimer.cancel();
                     wsProbeTimer = null;
                 }
+                if (wsReconnectTimer != null) {
+                    wsReconnectTimer.cancel();
+                    wsReconnectTimer = null;
+                }
                 if (wsFallingBack)
                     return;
                 wsHandle = holder[0];
                 wsEstablished = true;
+                wsReconnectAttempts = 0;
+                stopLpr();
                 updateMainWindow();
                 startWsPing();
             }
@@ -271,12 +312,52 @@ public class Client implements EntryPoint {
 
             @Override
             public void onClose() {
-                // Close-before-open (or probe failure) -> plain LPR fallback; established drop -> full re-init.
-                fallbackToLpr(wsEstablished);
+                if (wsEstablished)
+                    // Established drop mid-session: reconnect the socket on the same HttpSession
+                    // (cookies still sent on the handshake) and re-seed via server onOpen init.
+                    scheduleWsReconnect();
+                else
+                    // Close-before-open (or probe failure) -> plain LPR fallback.
+                    fallbackToLpr(false);
             }
         });
-        if (holder[0] == null)
-            fallbackToLpr(false);
+        if (holder[0] == null) {
+            if (reconnect)
+                scheduleWsReconnect();
+            else
+                fallbackToLpr(false);
+        }
+    }
+
+    /**
+     * Schedules a WS reconnect with exponential backoff (2s, 4s, 8s, capped at 30s, up to 10 attempts). Outgoing
+     * commands issued meanwhile go via {@code POST /actions/cmd} ({@link #sendMsg}), and the server routes pushes
+     * to the live socket once it re-opens, so an in-flight scan keeps reporting. After exhausting attempts, falls
+     * back to LPR with re-init.
+     */
+    private void scheduleWsReconnect() {
+        if (wsReconnectTimer != null || wsFallingBack)
+            return;
+        stopWsPing();
+        if (wsHandle != null) {
+            WsChannel.close(wsHandle);
+            wsHandle = null;
+        }
+        if (wsReconnectAttempts >= 10) {
+            wsReconnectAttempts = 0;
+            fallbackToLpr(true);
+            return;
+        }
+        final int delayMs = Math.min(30000, 2000 << Math.min(wsReconnectAttempts, 4));
+        wsReconnectAttempts++;
+        wsReconnectTimer = new Timer() {
+            @Override
+            public void run() {
+                wsReconnectTimer = null;
+                openWs(true);
+            }
+        };
+        wsReconnectTimer.schedule(delayMs);
     }
 
     /**
@@ -294,6 +375,10 @@ public class Client implements EntryPoint {
             wsProbeTimer.cancel();
             wsProbeTimer = null;
         }
+        if (wsReconnectTimer != null) {
+            wsReconnectTimer.cancel();
+            wsReconnectTimer = null;
+        }
         stopWsPing();
         if (wsHandle != null) {
             WsChannel.close(wsHandle);
@@ -306,8 +391,12 @@ public class Client implements EntryPoint {
     }
 
     /**
-     * Starts the WS heartbeat: {@code {"cmd":"Global.ping"}} every ~120s (server replies nothing; keeps the
-     * HttpSession alive since WS frames do not touch {@code lastAccessedTime}).
+     * Starts the WS keep-alive: {@code {"cmd":"Global.ping"}} every ~120s. Every server-side send (and every
+     * inbound client frame) refreshes the HttpSession {@code lastAccessedTime} via
+     * {@link jrm.server.shared.ws.WsActionMgr#touch}, and this ping guarantees at least one such refresh per
+     * interval even when the server has nothing to push. Well below the 300s {@code MaxInactiveInterval}; the
+     * previous {@code GET /session} variant fired exactly on the timeout boundary and lost the race with the
+     * scavenger.
      */
     private static void startWsPing() {
         stopWsPing();

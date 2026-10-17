@@ -1,7 +1,7 @@
 plugins {
-    id("de.undercouch.download") version "latest.release"
+    id("de.undercouch.download") version "5.7.0"
     id("de.esoco.gwt") version "1.3.1"
-    id("org.sonarqube") version "latest.release"
+    id("org.sonarqube") version "7.5.0.8588"
 }
 
 repositories {

@@ -87,7 +87,7 @@ public class Client implements EntryPoint {
      * Incremental command that parses a server-pushed JSON message and dispatches
      * the resulting protocol action to the appropriate handler.
      */
-    private class EatSleepRaveRepeat implements RepeatingCommand {
+    private static class EatSleepRaveRepeat implements RepeatingCommand {
         /** The raw JSON message received from the server. */
         final String msg;
 
@@ -102,11 +102,11 @@ public class Client implements EntryPoint {
 
         @Override
         public boolean execute() {
-            execute(new A_(JsonUtils.safeEval(msg)));
+            dispatch(new A_(JsonUtils.safeEval(msg)));
             return false;
         }
 
-        private void execute(A_ a) {
+        private static void dispatch(A_ a) {
             if (a.getCmd().startsWith("Global.")) {
                 executeGlobal(a);
                 return;
@@ -143,24 +143,28 @@ public class Client implements EntryPoint {
             }
         }
 
-        private void executeGlobal(A_ a) {
+        private static void executeGlobal(A_ a) {
             switch (a.getCmd()) {
                 case "Global.setMemory" -> mainWindow.update(new A_Global.SetMemory(a));
-                case "Global.updateProperty" -> new A_Global.UpdateProperty(a).getProperties().forEach((k, v) -> {
-                    if (v instanceof String s)
-                        session.setSetting(k, s);
-                    else if (v instanceof Boolean b)
-                        session.setSetting(k, b);
-                    else if (v instanceof Integer i)
-                        session.setSetting(k, i);
-                });
+                case "Global.updateProperty" -> applyProperties(new A_Global.UpdateProperty(a));
                 case "Global.warn" -> SC.warn(new A_Global.Warn(a).getMsg());
                 case "Global.multiCMD" -> {
                     for (final var sa : new A_Global.MultiCMD(a).getSubCMDs())
-                        execute(sa);
+                        dispatch(sa);
                 }
                 default -> { /* NOSONAR */ }
             }
+        }
+
+        private static void applyProperties(A_Global.UpdateProperty update) {
+            update.getProperties().forEach((k, v) -> {
+                if (v instanceof String s)
+                    session.setSetting(k, s);
+                else if (v instanceof Boolean b)
+                    session.setSetting(k, b);
+                else if (v instanceof Integer i)
+                    session.setSetting(k, i);
+            });
         }
 
     }
@@ -170,7 +174,7 @@ public class Client implements EntryPoint {
      *
      * @param msg the raw JSON message
      */
-    private void processCmd(String msg) {
+    private static void processCmd(String msg) {
         if (msg == null || msg.isBlank())
             return;
         try {
@@ -185,7 +189,7 @@ public class Client implements EntryPoint {
      *
      * @param init {@code true} for the initial session-establishing request
      */
-    private void lpr(boolean init) {
+    private static void lpr(boolean init) {
         updateMainWindow();
         RPCRequest request = new RPCRequest();
         request.setActionURL(init ? "/actions/init" : "/actions/lpr");
@@ -228,7 +232,7 @@ public class Client implements EntryPoint {
     /**
      * Starts the classic LPR loop ({@code /actions/init} once, then {@code /actions/lpr}).
      */
-    private void startLpr() {
+    private static void startLpr() {
         lprRunning = true;
         setLprTimer(new Timer() {
             boolean init = true;
@@ -255,7 +259,7 @@ public class Client implements EntryPoint {
      * {@code onOpen}); on error/close-before-open/timeout, falls back to {@link #startLpr()}. No parallel LPR runs
      * while probing: the probe outcome decides which channel starts.
      */
-    private void probeWs() {
+    private static void probeWs() {
         openWs(false);
     }
 
@@ -266,48 +270,53 @@ public class Client implements EntryPoint {
      * @param reconnect {@code true} when re-opening after an established drop (no probe timeout; a guarded
      *        reconnect is scheduled on failure instead of falling back to LPR)
      */
-    private void openWs(final boolean reconnect) {
+    private static void openWs(final boolean reconnect) {
         final String scheme = "https:".equals(com.google.gwt.user.client.Window.Location.getProtocol()) ? "wss://" : "ws://";
         final String url = scheme + com.google.gwt.user.client.Window.Location.getHost() + "/ws";
-        final var instance = this;
         if (!reconnect)
             wsEstablished = false;
         wsFallingBack = false;
-        if (!reconnect) {
-            wsProbeTimer = new Timer() {
-                @Override
-                public void run() {
-                    // Probe timed out (~3s): fall back to LPR.
-                    fallbackToLpr(false);
-                }
-            };
-            wsProbeTimer.schedule(3000);
-        }
+        if (!reconnect)
+            armWsProbeTimer();
         final JavaScriptObject[] holder = new JavaScriptObject[1];
-        holder[0] = WsChannel.open(url, new WsChannel.Handler() {
+        holder[0] = WsChannel.open(url, newWsHandler(holder));
+        if (holder[0] == null)
+            handleWsOpenFailure(reconnect);
+    }
+
+    /**
+     * Arms the probe timeout bounding the WS open wait (~3s).
+     */
+    private static void armWsProbeTimer() {
+        wsProbeTimer = new Timer() {
+            @Override
+            public void run() {
+                // Probe timed out (~3s): fall back to LPR.
+                fallbackToLpr();
+            }
+        };
+        wsProbeTimer.schedule(3000);
+    }
+
+    /**
+     * Creates the lifecycle handler for a WS open attempt.
+     *
+     * @param holder single-element array holding the opaque socket handle once opened
+     * @return the channel handler
+     */
+    private static WsChannel.Handler newWsHandler(final JavaScriptObject[] holder) {
+        return new WsChannel.Handler() {
             @Override
             public void onOpen() {
-                if (wsProbeTimer != null) {
-                    wsProbeTimer.cancel();
-                    wsProbeTimer = null;
-                }
-                if (wsReconnectTimer != null) {
-                    wsReconnectTimer.cancel();
-                    wsReconnectTimer = null;
-                }
+                clearWsTimers();
                 if (wsFallingBack)
                     return;
-                wsHandle = holder[0];
-                wsEstablished = true;
-                wsReconnectAttempts = 0;
-                stopLpr();
-                updateMainWindow();
-                startWsPing();
+                enterWsMode(holder[0]);
             }
 
             @Override
             public void onMessage(String data) {
-                instance.processCmd(data);
+                processCmd(data);
             }
 
             @Override
@@ -318,15 +327,50 @@ public class Client implements EntryPoint {
                     scheduleWsReconnect();
                 else
                     // Close-before-open (or probe failure) -> plain LPR fallback.
-                    fallbackToLpr(false);
+                    fallbackToLpr();
             }
-        });
-        if (holder[0] == null) {
-            if (reconnect)
-                scheduleWsReconnect();
-            else
-                fallbackToLpr(false);
+        };
+    }
+
+    /**
+     * Cancels pending WS probe/reconnect timers.
+     */
+    private static void clearWsTimers() {
+        if (wsProbeTimer != null) {
+            wsProbeTimer.cancel();
+            wsProbeTimer = null;
         }
+        if (wsReconnectTimer != null) {
+            wsReconnectTimer.cancel();
+            wsReconnectTimer = null;
+        }
+    }
+
+    /**
+     * Enters WS mode with the opened socket: resets the reconnect backoff, stops any
+     * running LPR loop, and starts the heartbeat.
+     *
+     * @param handle the opened socket handle
+     */
+    private static void enterWsMode(final JavaScriptObject handle) {
+        wsHandle = handle;
+        wsEstablished = true;
+        wsReconnectAttempts = 0;
+        stopLpr();
+        updateMainWindow();
+        startWsPing();
+    }
+
+    /**
+     * Handles a synchronous WS open failure (unsupported browser).
+     *
+     * @param reconnect {@code true} when re-opening after an established drop
+     */
+    private static void handleWsOpenFailure(final boolean reconnect) {
+        if (reconnect)
+            scheduleWsReconnect();
+        else
+            fallbackToLpr();
     }
 
     /**
@@ -335,17 +379,13 @@ public class Client implements EntryPoint {
      * to the live socket once it re-opens, so an in-flight scan keeps reporting. After exhausting attempts, falls
      * back to LPR with re-init.
      */
-    private void scheduleWsReconnect() {
+    private static void scheduleWsReconnect() {
         if (wsReconnectTimer != null || wsFallingBack)
             return;
-        stopWsPing();
-        if (wsHandle != null) {
-            WsChannel.close(wsHandle);
-            wsHandle = null;
-        }
+        closeWsHandle();
         if (wsReconnectAttempts >= 10) {
             wsReconnectAttempts = 0;
-            fallbackToLpr(true);
+            fallbackToLpr();
             return;
         }
         final int delayMs = Math.min(30000, 2000 << Math.min(wsReconnectAttempts, 4));
@@ -361,29 +401,27 @@ public class Client implements EntryPoint {
     }
 
     /**
-     * Falls back to LPR exactly once per drop. A fresh drop performs a full re-init ({@code /actions/init} once to
-     * re-seed profile/catver/nplayers + {@code Progress.reload}, then {@code /actions/lpr}) because pushes sent
-     * during WS mode were socket-only and never queued.
-     *
-     * @param reinit {@code true} when dropping an established WS session
+     * Closes the WS socket handle and stops the heartbeat.
      */
-    private void fallbackToLpr(boolean reinit) {
-        if (wsFallingBack)
-            return;
-        wsFallingBack = true;
-        if (wsProbeTimer != null) {
-            wsProbeTimer.cancel();
-            wsProbeTimer = null;
-        }
-        if (wsReconnectTimer != null) {
-            wsReconnectTimer.cancel();
-            wsReconnectTimer = null;
-        }
+    private static void closeWsHandle() {
         stopWsPing();
         if (wsHandle != null) {
             WsChannel.close(wsHandle);
             wsHandle = null;
         }
+    }
+
+    /**
+     * Falls back to LPR exactly once per drop. A fresh drop performs a full re-init ({@code /actions/init} once to
+     * re-seed profile/catver/nplayers + {@code Progress.reload}, then {@code /actions/lpr}) because pushes sent
+     * during WS mode were socket-only and never queued.
+     */
+    private static void fallbackToLpr() {
+        if (wsFallingBack)
+            return;
+        wsFallingBack = true;
+        clearWsTimers();
+        closeWsHandle();
         wsEstablished = false;
         // Both cases start with init=true (fresh re-seed); plain LPR fallback and post-drop re-init coincide.
         startLpr();

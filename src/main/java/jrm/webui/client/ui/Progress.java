@@ -232,46 +232,140 @@ public class Progress extends Window /* NOSONAR */ {
      *            instead of removing the rows (sub-info latch)
      */
     public void setInfos(int threadCnt, Boolean multipleSubInfos) {
-        // Sub-info latch: once the sub-info rows were first shown, keep them even when
-        // a later setInfos would drop them (null mode) — avoids rows appearing/disappearing.
+        multipleSubInfos = resolveMultipleSubInfos(multipleSubInfos);
+        if (isUnchangedConfig(threadCnt, multipleSubInfos))
+            return;
+        storeConfig(threadCnt, multipleSubInfos);
+        panel.removeMembers(panel.getMembers());
+        initInfoArrays(threadCnt, multipleSubInfos);
+        buildInfoRows(threadCnt, multipleSubInfos);
+        addSharedSubInfoRow(multipleSubInfos);
+        repackIfDrawn();
+    }
+
+    /**
+     * Applies the sub-info latch: once sub-info rows were first shown, a {@code null}
+     * mode keeps the last mode instead of removing the rows.
+     *
+     * @param multipleSubInfos the requested sub-info mode
+     * @return the effective sub-info mode
+     */
+    private Boolean resolveMultipleSubInfos(Boolean multipleSubInfos) {
         if (subInfosShown && multipleSubInfos == null)
-            multipleSubInfos = currentMultipleSubInfos;
+            return currentMultipleSubInfos;
         if (multipleSubInfos != null)
             subInfosShown = true;
-        if (threadCnt == currentThreadCnt && Objects.equals(multipleSubInfos, currentMultipleSubInfos))
-            return;
+        return multipleSubInfos;
+    }
+
+    /**
+     * Tells whether the requested info configuration is already applied.
+     *
+     * @param threadCnt the requested thread count
+     * @param multipleSubInfos the effective sub-info mode
+     * @return {@code true} when nothing changed
+     */
+    private boolean isUnchangedConfig(int threadCnt, Boolean multipleSubInfos) {
+        return threadCnt == currentThreadCnt && Objects.equals(multipleSubInfos, currentMultipleSubInfos);
+    }
+
+    /**
+     * Stores the applied info configuration.
+     *
+     * @param threadCnt the thread count to store
+     * @param multipleSubInfos the sub-info mode to store
+     */
+    private void storeConfig(int threadCnt, Boolean multipleSubInfos) {
         currentThreadCnt = threadCnt;
         currentMultipleSubInfos = multipleSubInfos;
+    }
 
-        panel.removeMembers(panel.getMembers());
-
+    /**
+     * Allocates the info label arrays for the given configuration.
+     *
+     * @param threadCnt the number of thread info lines
+     * @param multipleSubInfos the effective sub-info mode
+     */
+    private void initInfoArrays(int threadCnt, Boolean multipleSubInfos) {
         lblInfo = new Label[threadCnt];
-        int subInfoSize = 0;
-        if (multipleSubInfos != null)
-            subInfoSize = multipleSubInfos ? threadCnt : 1;
+        final var subInfoSize = subInfoSize(threadCnt, multipleSubInfos);
         lblSubInfo = new Label[subInfoSize];
         lastInfo = new String[threadCnt];
         lastSubInfo = new String[subInfoSize];
+    }
 
-        for (int i = 0; i < threadCnt; i++) {
-            final var color = isOdd(i) ? COLOR_NORMAL : COLOR_LIGHT;
-            lblInfo[i] = buildLabel(color);
-            if (Boolean.TRUE.equals(multipleSubInfos)) {
-                lblSubInfo[i] = buildLabel(color);
-                lblInfo[i].setWidth("55%");
-                lblSubInfo[i].setWidth("45%");
-                final HLayout row = new HLayout();
-                row.setMembersMargin(2);
-                row.addMembers(lblInfo[i], lblSubInfo[i]);
-                panel.addMember(row);
-            } else {
-                panel.addMember(lblInfo[i]);
-            }
-        }
+    /**
+     * Computes the sub-info array size for the given configuration.
+     *
+     * @param threadCnt the number of thread info lines
+     * @param multipleSubInfos the effective sub-info mode
+     * @return {@code threadCnt} for per-thread mode, {@code 1} for shared mode, {@code 0} for none
+     */
+    private static int subInfoSize(int threadCnt, Boolean multipleSubInfos) {
+        if (multipleSubInfos == null)
+            return 0;
+        return multipleSubInfos ? threadCnt : 1;
+    }
+
+    /**
+     * Builds one info row per thread.
+     *
+     * @param threadCnt the number of thread info lines
+     * @param multipleSubInfos the effective sub-info mode
+     */
+    private void buildInfoRows(int threadCnt, Boolean multipleSubInfos) {
+        for (int i = 0; i < threadCnt; i++)
+            buildInfoRow(i, multipleSubInfos);
+    }
+
+    /**
+     * Builds a single info row, placing its sub-info label to the right when in
+     * per-thread mode.
+     *
+     * @param i the thread index
+     * @param multipleSubInfos the effective sub-info mode
+     */
+    private void buildInfoRow(int i, Boolean multipleSubInfos) {
+        final var color = isOdd(i) ? COLOR_NORMAL : COLOR_LIGHT;
+        lblInfo[i] = buildLabel(color);
+        if (Boolean.TRUE.equals(multipleSubInfos))
+            addPairedSubInfoRow(i, color);
+        else
+            panel.addMember(lblInfo[i]);
+    }
+
+    /**
+     * Adds a paired info/sub-info row sharing the same background color.
+     *
+     * @param i the thread index
+     * @param color the row background color
+     */
+    private void addPairedSubInfoRow(int i, String color) {
+        lblSubInfo[i] = buildLabel(color);
+        lblInfo[i].setWidth("55%");
+        lblSubInfo[i].setWidth("45%");
+        final HLayout row = new HLayout();
+        row.setMembersMargin(2);
+        row.addMembers(lblInfo[i], lblSubInfo[i]);
+        panel.addMember(row);
+    }
+
+    /**
+     * Adds the single shared sub-info row when in shared mode.
+     *
+     * @param multipleSubInfos the effective sub-info mode
+     */
+    private void addSharedSubInfoRow(Boolean multipleSubInfos) {
         if (Boolean.FALSE.equals(multipleSubInfos)) {
             lblSubInfo[0] = buildLabel(COLOR_LIGHTER);
             panel.addMember(lblSubInfo[0]);
         }
+    }
+
+    /**
+     * Recomputes the window height when already drawn.
+     */
+    private void repackIfDrawn() {
         if (isVisible() && Boolean.TRUE.equals(isDrawn()))
             packHeight();
     }
@@ -330,8 +424,6 @@ public class Progress extends Window /* NOSONAR */ {
      * pushes (e.g. a re-sent loading GIF) do not redraw the canvas and the GIF
      * animation does not restart on every update.
      *
-     * @param label
-     *            the label to update
      * @param text
      *            the new text (null becomes {@code def})
      * @param cache
@@ -339,11 +431,11 @@ public class Progress extends Window /* NOSONAR */ {
      * @param index
      *            the index into {@code cache} and the labels array
      * @param labels
-     *            the labels array owning {@code label}
+     *            the labels array owning the label to update
      * @param def
      *            the default text for null
      */
-    private static void setContentsIfChanged(Label label, String text, String[] cache, int index, Label[] labels, String def) {
+    private static void setContentsIfChanged(String text, String[] cache, int index, Label[] labels, String def) {
         final var value = Optional.ofNullable(text).orElse(def);
         if (cache[index] == null || !cache[index].equals(value)) {
             labels[index].setContents(value);
@@ -409,7 +501,7 @@ public class Progress extends Window /* NOSONAR */ {
      * @param i the index to test
      * @return {@code true} if {@code i} is odd, {@code false} otherwise
      */
-    private boolean isOdd(int i) {
+    private static boolean isOdd(int i) {
         return (i % 2) != 0;
     }
 
@@ -419,7 +511,7 @@ public class Progress extends Window /* NOSONAR */ {
      * @param color the CSS background color to apply
      * @return a new configured {@link Label}
      */
-    private Label buildLabel(String color) {
+    private static Label buildLabel(String color) {
         final var label = new Label();
         label.setWidth100();
         label.setHeight(20);
@@ -454,9 +546,9 @@ public class Progress extends Window /* NOSONAR */ {
      */
     public void setFullProgress(A_Progress.SetFullProgress.ProgressData pd) {
         for (int i = 0; i < lblInfo.length; i++)
-            setContentsIfChanged(lblInfo[i], pd.getInfos().get(i), lastInfo, i, lblInfo, "");
+            setContentsIfChanged(pd.getInfos().get(i), lastInfo, i, lblInfo, "");
         for (int i = 0; i < lblSubInfo.length; i++)
-            setContentsIfChanged(lblSubInfo[i], pd.getSubInfos().get(i), lastSubInfo, i, lblSubInfo, "");
+            setContentsIfChanged(pd.getSubInfos().get(i), lastSubInfo, i, lblSubInfo, "");
         updateProgressBar(progressBar, progressBarLabel, lblTimeleft, pd.getPB1(), false, 0);
         updateProgressBar(progressBar2, progressBarLabel2, lblTimeLeft2, pd.getPB2(), true, 1);
         updateProgressBar(progressBar3, progressBarLabel3, lblTimeLeft3, pd.getPB3(), true, 2);

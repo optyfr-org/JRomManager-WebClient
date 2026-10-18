@@ -36,19 +36,22 @@ final class SettingsGenPanel extends SettingsForm /* NOSONAR */ {
         setLayoutAlign(Alignment.CENTER);
         setNumCols(4);
         setColWidths(150, "*", 20, 20);
+        final var session = Client.getSession();
         final var threadCount = new SelectItem(CB_THREAD_COUNT);
-        threadCount.setTitle(Client.getSession().getMsg("SettingsGenPanel.lblThreading.text"));
-        final var map = new LinkedHashMap<Integer, String>();
-        map.put(-1, "Adaptive");
-        map.put(0, "Max available");
-        int maxthreadcount = Client.getSession().getSettingAsInteger("MaxThreadCount", 8);
-        for (int i = 1; i <= maxthreadcount; i++)
-            map.put(i, Integer.toString(i) + (i > 1 ? " threads" : " thread"));
+        threadCount.setTitle(session.getMsg("SettingsGenPanel.lblThreading.text"));
+        final var map = new LinkedHashMap<String, String>();
+        map.put("-1", session.getMsg("SettingsGenPanel.threadCount.adaptive"));
+        map.put("0", session.getMsg("SettingsGenPanel.threadCount.maxAvailable"));
+        final Integer maxThreadCountSetting = session.getSettingAsInteger("MaxThreadCount", 8);
+        final int maxThreadCount = Math.max(1, maxThreadCountSetting != null ? maxThreadCountSetting : 8);
+        for (int i = 1; i <= maxThreadCount; i++)
+            map.put(Integer.toString(i), i == 1 ? "1 thread" : i + " threads"); //$NON-NLS-1$ //$NON-NLS-2$
         threadCount.setValueMap(map);
         threadCount.setWidth("*");
         threadCount.setColSpan(3);
-        threadCount.addChangedHandler(event -> setGPropertyItemValue(CB_THREAD_COUNT, fname2name.get(CB_THREAD_COUNT), (Integer) threadCount.getValue()));
-        threadCount.setDefaultValue(Client.getSession().getSettingAsInteger(fname2name.get(CB_THREAD_COUNT), -1));
+        threadCount.addChangedHandler(event -> setGPropertyItemValue(CB_THREAD_COUNT, fname2name.get(CB_THREAD_COUNT), threadCount.getValueAsInteger()));
+        final Integer threadCountSetting = session.getSettingAsInteger(fname2name.get(CB_THREAD_COUNT), -1);
+        threadCount.setDefaultValue(Integer.toString(threadCountSetting != null ? threadCountSetting : -1));
         final var backupDest = new TextItem(TF_BACKUP_G_DEST, Client.getSession().getMsg("MainFrame.lblBackupDest.text"));
         backupDest.setWidth("*");
         backupDest.setCanEdit(false);

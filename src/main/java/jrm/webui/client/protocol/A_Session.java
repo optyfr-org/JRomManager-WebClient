@@ -75,10 +75,13 @@ public class A_Session extends EnhJSO // NOSONAR
      */
     public final Map<String, String> getMsgs() {
         if (msgsCache.size() == 0) {
-            EnhJSO propJso = getJSO("msgs");
-            JsArrayString props = getProperties(propJso);
-            for (int i = 0; i < props.length(); i++)
-                msgsCache.put(props.get(i), propJso.get(props.get(i)));
+            final EnhJSO propJso = getJSO("msgs");
+            if (propJso != null) {
+                final JsArrayString props = getProperties(propJso);
+                if (props != null)
+                    for (int i = 0; i < props.length(); i++)
+                        msgsCache.put(props.get(i), propJso.get(props.get(i)));
+            }
         }
         return msgsCache;
     }
@@ -91,8 +94,11 @@ public class A_Session extends EnhJSO // NOSONAR
      * @return the setting value, or {@code def}
      */
     public final String getSetting(String key, String def) {
-        EnhJSO propJso = getJSO(SETTINGS_STR);
-        return propJso.exists(key) ? propJso.get(key) : def;
+        final EnhJSO propJso = getJSO(SETTINGS_STR);
+        if (propJso == null || !propJso.exists(key))
+            return def;
+        final String val = propJso.get(key);
+        return val != null ? val : def;
     }
 
     /**
@@ -103,8 +109,11 @@ public class A_Session extends EnhJSO // NOSONAR
      * @return the setting value, or {@code def}
      */
     public final Boolean getSettingAsBoolean(String key, boolean def) {
-        EnhJSO propJso = getJSO(SETTINGS_STR);
-        return propJso.exists(key) ? propJso.getBoolean(key) : def;
+        final EnhJSO propJso = getJSO(SETTINGS_STR);
+        if (propJso == null || !propJso.exists(key))
+            return def;
+        final Boolean val = propJso.getBoolean(key);
+        return val != null ? val : def;
     }
 
     /**
@@ -115,8 +124,11 @@ public class A_Session extends EnhJSO // NOSONAR
      * @return the setting value, or {@code def}
      */
     public final Integer getSettingAsInteger(String key, int def) {
-        EnhJSO propJso = getJSO(SETTINGS_STR);
-        return propJso.exists(key) ? propJso.getInteger(key) : def;
+        final EnhJSO propJso = getJSO(SETTINGS_STR);
+        if (propJso == null || !propJso.exists(key))
+            return def;
+        final Integer val = propJso.getInteger(key);
+        return val != null ? val : def;
     }
 
     /**
@@ -170,7 +182,8 @@ public class A_Session extends EnhJSO // NOSONAR
      * @return the localized message text, or {@code null} if not found
      */
     public final String getMsg(String code) {
-        return getMsgs().get(code);
+        final String msg = getMsgs().get(code);
+        return msg != null ? msg : code;
     }
 
 }

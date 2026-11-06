@@ -64,34 +64,34 @@ tasks.register<de.undercouch.gradle.tasks.download.Download>("downloadSmartGWT")
             "https://www.smartclient.com/builds/SmartGWT/${scversion}/LGPL/${scdate}/smartgwt-skins.jar"
         )
     )
-    dest("$buildDir/smartgwt-${scversion}")
+    dest(layout.buildDirectory.dir("smartgwt-${scversion}"))
     onlyIfModified(true)
 }
 
 tasks.register<de.undercouch.gradle.tasks.download.Download>("dlSmartGWT") {
     src("https://www.smartclient.com/builds/SmartGWT/${scversion}/LGPL/${scdate}/smartgwt-${scversion}.zip")
-    dest(buildDir)
+    dest(layout.buildDirectory)
     onlyIfModified(true)
 }
 
 tasks.register<Copy>("extractSmartGWT") {
     dependsOn("dlSmartGWT")
-    from(zipTree("$buildDir/smartgwt-${scversion}.zip")) {
+    from(zipTree(layout.buildDirectory.file("smartgwt-${scversion}.zip"))) {
         include("**/smartgwt.jar")
         include("**/smartgwt-skins.jar")
         includeEmptyDirs = false
     }
-    into(buildDir)
+    into(layout.buildDirectory)
 }
 
 tasks.register("SmartGWT") {
     dependsOn("extractSmartGWT")
-    outputs.file("$buildDir/smartgwt-${scversion}/smartgwt.jar")
+    outputs.file(layout.buildDirectory.file("smartgwt-${scversion}/smartgwt.jar"))
 }
 
 tasks.register("SmartGWTSkins") {
     dependsOn("extractSmartGWT")
-    outputs.file("$buildDir/smartgwt-${scversion}/smartgwt-skins.jar")
+    outputs.file(layout.buildDirectory.file("smartgwt-${scversion}/smartgwt-skins.jar"))
 }
 
 apply(plugin = "war")
@@ -163,7 +163,7 @@ gwt {
         /** shown all compile errors */
         strict = false
 
-        setWar("$buildDir/gwt/debug")
+        setWar(layout.buildDirectory.dir("gwt/debug").get().asFile.absolutePath)
 
         /** Java args */
         val lombokJar = project.configurations["annotationProcessor"].filter { it.name.contains("lombok") }.singleFile
@@ -177,7 +177,7 @@ gwt {
 tasks.named("gwtCompile") {
     doFirst {
         delete {
-            delete("$buildDir/gwt/debug")
+            delete(layout.buildDirectory.dir("gwt/debug"))
         }
     }
 }
@@ -194,7 +194,7 @@ tasks.named<War>("war") {
             delete("war/smartgwt")
         }
         copy {
-            from("$buildDir/gwt/debug")
+            from(layout.buildDirectory.dir("gwt/debug"))
             into("war")
             duplicatesStrategy = DuplicatesStrategy.EXCLUDE
         }
@@ -203,11 +203,11 @@ tasks.named<War>("war") {
 
 tasks.register<Zip>("webZip") {
     dependsOn("gwtCompile")
-    from("$buildDir/gwt/out/smartgwt")
+    from(layout.buildDirectory.dir("gwt/out/smartgwt"))
     into("webclient")
     archiveBaseName.set("debug")
     archiveFileName.set("debug.zip")
-    destinationDirectory.set(file("$buildDir/distributions"))
+    destinationDirectory.set(layout.buildDirectory.dir("distributions"))
 }
 
 tasks.named("build") {

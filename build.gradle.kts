@@ -80,34 +80,34 @@ tasks.register<de.undercouch.gradle.tasks.download.Download>("downloadSmartGWT")
             "https://www.smartclient.com/builds/SmartGWT/${scversion}p/LGPL/${scdate}/smartgwt-skins.jar"
         )
     )
-    dest("$buildDir/smartgwt-${scversion}p")
+    dest(layout.buildDirectory.dir("smartgwt-${scversion}p"))
     onlyIfModified(true)
 }
 
 tasks.register<de.undercouch.gradle.tasks.download.Download>("dlSmartGWT") {
     src("https://www.smartclient.com/builds/SmartGWT/${scversion}p/LGPL/${scdate}/smartgwt-${scversion}p.zip")
-    dest(buildDir)
+    dest(layout.buildDirectory)
     onlyIfModified(true)
 }
 
 tasks.register<Copy>("extractSmartGWT") {
     dependsOn("dlSmartGWT")
-    from(zipTree("$buildDir/smartgwt-${scversion}p.zip")) {
+    from(zipTree(layout.buildDirectory.file("smartgwt-${scversion}p.zip"))) {
         include("**/smartgwt.jar")
         include("**/smartgwt-skins.jar")
         includeEmptyDirs = false
     }
-    into(buildDir)
+    into(layout.buildDirectory)
 }
 
 tasks.register("SmartGWT") {
     dependsOn("extractSmartGWT")
-    outputs.file("$buildDir/smartgwt-${scversion}p/smartgwt.jar")
+    outputs.file(layout.buildDirectory.file("smartgwt-${scversion}p/smartgwt.jar"))
 }
 
 tasks.register("SmartGWTSkins") {
     dependsOn("extractSmartGWT")
-    outputs.file("$buildDir/smartgwt-${scversion}p/smartgwt-skins.jar")
+    outputs.file(layout.buildDirectory.file("smartgwt-${scversion}p/smartgwt-skins.jar"))
 }
 
 // war + de.esoco.gwt already applied via plugins {} above.
@@ -177,7 +177,7 @@ gwt {
         /** shown all compile errors */
         strict = false
 
-        setWar("$buildDir/gwt/release")
+        setWar(layout.buildDirectory.dir("gwt/release").get().asFile.absolutePath)
 
         /** Java args */
         val lombokJar = project.configurations["annotationProcessor"].filter { it.name.contains("lombok") }.singleFile
@@ -191,7 +191,7 @@ gwt {
 tasks.named("gwtCompile") {
     doFirst {
         delete {
-            delete("$buildDir/gwt/release")
+            delete(layout.buildDirectory.dir("gwt/release"))
         }
     }
 }
@@ -208,7 +208,7 @@ tasks.named<War>("war") {
             delete("war/smartgwt")
         }
         copy {
-            from("$buildDir/gwt/release")
+            from(layout.buildDirectory.dir("gwt/release"))
             into("war")
             duplicatesStrategy = DuplicatesStrategy.EXCLUDE
         }
@@ -218,7 +218,7 @@ tasks.named<War>("war") {
 tasks.named<Jar>("jar") {
     dependsOn("gwtCompile")
     exclude("/jrm")
-    from("$buildDir/gwt/release") {
+    from(layout.buildDirectory.dir("gwt/release")) {
         into("webclient")
     }
     from("$projectDir/war/index.html") {
@@ -235,11 +235,11 @@ tasks.named("build") {
 
 tasks.register<Zip>("webZip") {
     dependsOn("gwtCompile")
-    from("$buildDir/gwt/out/smartgwt")
+    from(layout.buildDirectory.dir("gwt/out/smartgwt"))
     into("webclient")
     archiveBaseName.set("release")
     archiveFileName.set("release.zip")
-    destinationDirectory.set(file("$buildDir/distributions"))
+    destinationDirectory.set(layout.buildDirectory.dir("distributions"))
 }
 
 tasks.named("build") {
@@ -259,7 +259,7 @@ tasks.register<JavaExec>("delombok") {
         args = listOf(
             "delombok",
             "src/main/java",
-            "-d", "$buildDir/generated/delombok/src/main/java",
+            "-d", layout.buildDirectory.dir("generated/delombok/src/main/java").get().asFile.absolutePath,
             "--classpath", (project.the<SourceSetContainer>()["main"].compileClasspath + lombokJar).asPath
         )
     }
@@ -270,7 +270,7 @@ tasks.register<JavaExec>("delombok") {
 // `project.` here.
 tasks.named<Javadoc>("javadoc") {
     dependsOn("delombok")
-    source(fileTree("$buildDir/generated/delombok/src/main/java") {
+    source(fileTree(layout.buildDirectory.dir("generated/delombok/src/main/java")) {
         include("**/*.java")
     })
     classpath = project.the<SourceSetContainer>()["main"].output.classesDirs + configurations["compileClasspath"]

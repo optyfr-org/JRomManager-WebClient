@@ -393,21 +393,29 @@ public class Progress extends Window /* NOSONAR */ {
         final var oldThreadCnt = lblInfo.length;
 
         lblInfo = Arrays.copyOf(lblInfo, threadCnt);
-        if (Boolean.TRUE.equals(multipleSubInfos))
+        if (Boolean.TRUE.equals(multipleSubInfos)) {
+            if (lblSubInfo == null) {
+                setInfos(threadCnt, multipleSubInfos);
+                return;
+            }
             lblSubInfo = Arrays.copyOf(lblSubInfo, threadCnt);
+        }
+        // Hoist to a local so the null check below dominates every use.
+        final var subInfos = lblSubInfo;
         lastInfo = Arrays.copyOf(lastInfo, threadCnt);
-        lastSubInfo = Arrays.copyOf(lastSubInfo, lblSubInfo.length);
+        if (subInfos != null)
+            lastSubInfo = Arrays.copyOf(lastSubInfo, subInfos.length);
 
         for (int i = oldThreadCnt; i < threadCnt; i++) {
             final var color = isOdd(i) ? COLOR_NORMAL : COLOR_LIGHT;
             lblInfo[i] = buildLabel(color);
-            if (Boolean.TRUE.equals(multipleSubInfos)) {
-                lblSubInfo[i] = buildLabel(color);
+            if (Boolean.TRUE.equals(multipleSubInfos) && subInfos != null) {
+                subInfos[i] = buildLabel(color);
                 lblInfo[i].setWidth("55%");
-                lblSubInfo[i].setWidth("45%");
+                subInfos[i].setWidth("45%");
                 final HLayout row = new HLayout();
                 row.setMembersMargin(2);
-                row.addMembers(lblInfo[i], lblSubInfo[i]);
+                row.addMembers(lblInfo[i], subInfos[i]);
                 panel.addMember(row);
             } else {
                 panel.addMember(lblInfo[i]);
